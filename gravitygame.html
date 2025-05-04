@@ -1,0 +1,1377 @@
+"use client"
+
+import type React from "react"
+
+import { useEffect, useRef, useState } from "react"
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, HelpCircle, RotateCcw, Volume2, VolumeX } from "lucide-react"
+import { Button } from "@/components/ui/button"
+
+// Define level configurations
+const LEVELS = [
+  {
+    name: "Level 1: First Landing",
+    description: "Land on the green base at the bottom of the planet.",
+    baseWidth: Math.PI / 4, // 45 degrees
+    gravity: 0.05,
+    safeSpeed: 8.0,
+    planetColor: "#3b82f6", // Blue
+    planetType: "earth", // Earth-like
+  },
+  {
+    name: "Level 2: Precision Landing",
+    description: "Land on the smaller green base.",
+    baseWidth: Math.PI / 6, // 30 degrees
+    gravity: 0.05,
+    safeSpeed: 7.0,
+    planetColor: "#8b5cf6", // Purple
+    planetType: "rocky", // Rocky planet
+  },
+  {
+    name: "Level 3: Heavy Gravity",
+    description: "Land on the base with increased gravity.",
+    baseWidth: Math.PI / 5, // 36 degrees
+    gravity: 0.08,
+    safeSpeed: 6.0,
+    planetColor: "#ec4899", // Pink
+    planetType: "gas", // Gas giant
+  },
+  {
+    name: "Level 4: Tiny Target",
+    description: "Land on the very small landing pad.",
+    baseWidth: Math.PI / 8, // 22.5 degrees
+    gravity: 0.07,
+    safeSpeed: 5.0,
+    planetColor: "#f97316", // Orange
+    planetType: "lava", // Lava planet
+  },
+  {
+    name: "Level 5: Expert Landing",
+    description: "Land precisely with strong gravity and low speed.",
+    baseWidth: Math.PI / 10, // 18 degrees
+    gravity: 0.1,
+    safeSpeed: 4.0,
+    planetColor: "#ef4444", // Red
+    planetType: "ice", // Ice planet
+  },
+]
+
+// Star background configuration
+const STAR_COUNT = 200
+const STAR_SIZES = [0.5, 1, 1.5, 2]
+const STAR_COLORS = ["#ffffff", "#fffaf0", "#f0f8ff", "#ffe4e1"]
+
+export default function SpaceshipGame() {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const requestRef = useRef<number>(0)
+  const [gameOver, setGameOver] = useState(false)
+  const [gameMessage, setGameMessage] = useState("")
+  const [landingGuidance, setLandingGuidance] = useState("")
+  const [currentLevel, setCurrentLevel] = useState(0)
+  const [showLevelIntro, setShowLevelIntro] = useState(true)
+  const [gameCompleted, setGameCompleted] = useState(false)
+  const [showHelp, setShowHelp] = useState(false)
+  const [soundEnabled, setSoundEnabled] = useState(true)
+
+  // Audio references
+  const thrustSoundRef = useRef<HTMLAudioElement | null>(null)
+  const crashSoundRef = useRef<HTMLAudioElement | null>(null)
+  const landingSoundRef = useRef<HTMLAudioElement | null>(null)
+  const buttonSoundRef = useRef<HTMLAudioElement | null>(null)
+  const completeSoundRef = useRef<HTMLAudioElement | null>(null)
+
+  // Background stars
+  const starsRef = useRef<Array<{ x: number; y: number; size: number; color: string; twinkle: number }>>([])
+
+  // Game variables
+  const shipRef = useRef({
+    x: 0,
+    y: 0,
+    vx: 0,
+    vy: 0,
+    angle: 0,
+    size: 15,
+    thrusting: false,
+    crashed: false,
+    landed: false,
+    isOverBase: false,
+    landedOnBase: false, // Track if landed on base specifically
+    netForce: { x: 0, y: 0 }, // Store net force for visualization
+    gravityForce: { x: 0, y: 0 }, // Store gravity force for visualization
+  })
+
+  const planetRef = useRef({
+    x: 0,
+    y: 0,
+    radius: 0,
+    gravityStrength: 0.05,
+    gravityFieldRadius: 0, // Will be set to 3x planet radius
+    color: "#3b82f6",
+    type: "earth",
+    features: [] as Array<{
+      angle: number
+      width: number
+      height: number
+      color: string
+    }>,
+  })
+
+  const baseRef = useRef({
+    width: 0,
+    height: 0,
+    angle: Math.PI / 2, // Bottom of planet
+    angleWidth: Math.PI / 4, // Wide landing pad (45 degrees)
+  })
+
+  const keysRef = useRef({
+    ArrowUp: false,
+    ArrowDown: false,
+    ArrowLeft: false,
+    ArrowRight: false,
+  })
+
+  // Sound effect functions
+  const playSound = (sound: "thrust" | "crash" | "landing" | "button" | "complete") => {
+    if (!soundEnabled) return
+
+    let audioRef: React.RefObject<HTMLAudioElement> | null = null
+
+    switch (sound) {
+      case "thrust":
+        audioRef = thrustSoundRef
+        break
+      case "crash":
+        audioRef = crashSoundRef
+        break
+      case "landing":
+        audioRef = landingSoundRef
+        break
+      case "button":
+        audioRef = buttonSoundRef
+        break
+      case "complete":
+        audioRef = completeSoundRef
+        break
+    }
+
+    if (audioRef?.current) {
+      // For thrust sound, we want it to loop while thrusting
+      if (sound === "thrust") {
+        if (audioRef.current.paused) {
+          audioRef.current.currentTime = 0
+          audioRef.current.play().catch((e) => console.log("Audio play failed:", e))
+        }
+      } else {
+        audioRef.current.currentTime = 0
+        audioRef.current.play().catch((e) => console.log("Audio play failed:", e))
+      }
+    }
+  }
+
+  const stopSound = (sound: "thrust") => {
+    let audioRef: React.RefObject<HTMLAudioElement> | null = null
+
+    switch (sound) {
+      case "thrust":
+        audioRef = thrustSoundRef
+        break
+    }
+
+    if (audioRef?.current && !audioRef.current.paused) {
+      audioRef.current.pause()
+      audioRef.current.currentTime = 0
+    }
+  }
+
+  // Initialize the game
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    // Generate stars for the background
+    generateStars(canvas.width, canvas.height)
+
+    // Set up keyboard controls
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (showLevelIntro) {
+        setShowLevelIntro(false)
+        playSound("button")
+        return
+      }
+
+      if (e.key in keysRef.current) {
+        keysRef.current[e.key as keyof typeof keysRef.current] = true
+
+        // Start thrust sound if thrusting
+        if (e.key === "ArrowUp" && !shipRef.current.crashed && !shipRef.current.landed) {
+          playSound("thrust")
+        }
+
+        // If any key is pressed and ship is landed, take off
+        if (shipRef.current.landed) {
+          shipRef.current.landed = false
+          shipRef.current.landedOnBase = false
+          // Add a small initial velocity away from planet
+          shipRef.current.vx = Math.cos(shipRef.current.angle - Math.PI / 2) * 0.5
+          shipRef.current.vy = Math.sin(shipRef.current.angle - Math.PI / 2) * 0.5
+        }
+      }
+
+      // Toggle help with 'H' key
+      if (e.key === "h" || e.key === "H") {
+        setShowHelp((prev) => !prev)
+        playSound("button")
+      }
+    }
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key in keysRef.current) {
+        keysRef.current[e.key as keyof typeof keysRef.current] = false
+
+        // Stop thrust sound if not thrusting
+        if (e.key === "ArrowUp") {
+          stopSound("thrust")
+        }
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    window.addEventListener("keyup", handleKeyUp)
+
+    // Initialize the level
+    initializeLevel(currentLevel)
+
+    // Start game loop
+    startGameLoop()
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown)
+      window.removeEventListener("keyup", handleKeyUp)
+      cancelAnimationFrame(requestRef.current)
+      stopSound("thrust")
+    }
+  }, [currentLevel, showLevelIntro, soundEnabled])
+
+  useEffect(() => {
+    if (!showLevelIntro) {
+      // Re-initialize the level when the intro is dismissed
+      initializeLevel(currentLevel)
+    }
+  }, [showLevelIntro, currentLevel])
+
+  // Generate stars for the background
+  const generateStars = (width: number, height: number) => {
+    const stars = []
+    for (let i = 0; i < STAR_COUNT; i++) {
+      stars.push({
+        x: Math.random() * width,
+        y: Math.random() * height,
+        size: STAR_SIZES[Math.floor(Math.random() * STAR_SIZES.length)],
+        color: STAR_COLORS[Math.floor(Math.random() * STAR_COLORS.length)],
+        twinkle: Math.random() * Math.PI * 2, // Random starting phase for twinkling
+      })
+    }
+    starsRef.current = stars
+  }
+
+  // Generate planet features based on planet type
+  const generatePlanetFeatures = (radius: number, type: string) => {
+    const features = []
+    const featureCount = Math.floor(Math.random() * 10) + 5 // 5-15 features
+
+    for (let i = 0; i < featureCount; i++) {
+      let color
+      const width = Math.random() * 0.3 + 0.1 // 0.1 to 0.4 radians
+      const height = Math.random() * (radius * 0.3) + radius * 0.1 // 10% to 40% of radius
+
+      // Set color based on planet type
+      switch (type) {
+        case "earth":
+          color = Math.random() > 0.7 ? "#10b981" : "#3b82f6" // Green or blue
+          break
+        case "rocky":
+          color = Math.random() > 0.5 ? "#9ca3af" : "#6b7280" // Gray shades
+          break
+        case "gas":
+          color = Math.random() > 0.6 ? "#c084fc" : "#a855f7" // Purple shades
+          break
+        case "lava":
+          color = Math.random() > 0.6 ? "#f97316" : "#b91c1c" // Orange or red
+          break
+        case "ice":
+          color = Math.random() > 0.7 ? "#e0f2fe" : "#bae6fd" // Light blue shades
+          break
+        default:
+          color = "#9ca3af" // Default gray
+      }
+
+      features.push({
+        angle: Math.random() * Math.PI * 2,
+        width,
+        height,
+        color,
+      })
+    }
+
+    return features
+  }
+
+  const initializeLevel = (level: number) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const width = canvas.width
+    const height = canvas.height
+
+    // Get level configuration
+    const levelConfig = LEVELS[level]
+
+    // Set up planet
+    const planetRadius = Math.min(width, height) * 0.15
+    planetRef.current = {
+      x: width / 2,
+      y: height / 2,
+      radius: planetRadius,
+      gravityStrength: levelConfig.gravity,
+      gravityFieldRadius: planetRadius * 3, // Gravity field is 3x the planet radius
+      color: levelConfig.planetColor,
+      type: levelConfig.planetType,
+      features: generatePlanetFeatures(planetRadius, levelConfig.planetType),
+    }
+
+    // Set up landing base
+    baseRef.current = {
+      width: planetRef.current.radius * 0.5, // Base width
+      height: 10, // Base height
+      angle: Math.PI / 2, // Bottom of planet
+      angleWidth: levelConfig.baseWidth,
+    }
+
+    // Position ship at the top of the planet
+    const shipSize = 15
+    const topAngle = -Math.PI / 2 // Top of the planet (270 degrees or -90 degrees)
+    shipRef.current = {
+      // Position ship at the top of the planet
+      x: width / 2 + Math.cos(topAngle) * (planetRadius + shipSize + 5),
+      y: height / 2 + Math.sin(topAngle) * (planetRadius + shipSize + 5),
+      vx: 0,
+      vy: 0,
+      angle: 0, // Point upward in screen coordinates
+      size: shipSize,
+      thrusting: false,
+      crashed: false,
+      landed: true, // Start landed
+      isOverBase: false,
+      landedOnBase: false,
+      netForce: { x: 0, y: 0 },
+      gravityForce: { x: 0, y: 0 },
+    }
+
+    // Stop any playing sounds
+    stopSound("thrust")
+  }
+
+  // Reset game when game over state changes
+  useEffect(() => {
+    if (!gameOver) return
+
+    // Stop thrust sound if game is over
+    stopSound("thrust")
+
+    const resetButton = document.getElementById("reset-button")
+    if (resetButton) {
+      resetButton.focus()
+    }
+
+    // Play appropriate sound
+    if (shipRef.current.crashed) {
+      playSound("crash")
+    } else if (shipRef.current.landedOnBase) {
+      if (gameCompleted) {
+        playSound("complete")
+      } else {
+        playSound("landing")
+      }
+    }
+  }, [gameOver])
+
+  // Game loop
+  const startGameLoop = () => {
+    const animate = () => {
+      if (!showLevelIntro) {
+        updateGame()
+      }
+      drawGame() // Always draw the game, even during level intro
+      requestRef.current = requestAnimationFrame(animate)
+    }
+
+    requestRef.current = requestAnimationFrame(animate)
+  }
+
+  // Check if a point is over the base
+  const isPointOverBase = (x: number, y: number) => {
+    const planet = planetRef.current
+    const base = baseRef.current
+
+    // Calculate angle from planet center to point
+    const dx = x - planet.x
+    const dy = y - planet.y
+    const angle = Math.atan2(dy, dx)
+
+    // Normalize angle to [0, 2π]
+    const normalizedAngle = ((angle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
+
+    // Check if angle is within base angles
+    const baseStartAngle = base.angle - base.angleWidth / 2
+    const baseEndAngle = base.angle + base.angleWidth / 2
+
+    return normalizedAngle >= baseStartAngle && normalizedAngle <= baseEndAngle
+  }
+
+  // Update game state
+  const updateGame = () => {
+    const ship = shipRef.current
+    const planet = planetRef.current
+    const base = baseRef.current
+    const canvas = canvasRef.current
+    if (!canvas || ship.crashed) return
+
+    // Update star twinkling
+    starsRef.current.forEach((star) => {
+      star.twinkle += 0.01
+      if (star.twinkle > Math.PI * 2) star.twinkle = 0
+    })
+
+    // If ship is landed, don't update position
+    if (ship.landed) {
+      return
+    }
+
+    // Handle controls
+    if (keysRef.current.ArrowLeft) {
+      ship.angle -= 0.1
+    }
+
+    if (keysRef.current.ArrowRight) {
+      ship.angle += 0.1
+    }
+
+    // Apply thrust
+    ship.thrusting = keysRef.current.ArrowUp
+    if (ship.thrusting) {
+      // Play thrust sound
+      if (soundEnabled) {
+        playSound("thrust")
+      }
+
+      // Calculate thrust force
+      const thrustForceX = Math.cos(ship.angle - Math.PI / 2) * 0.5
+      const thrustForceY = Math.sin(ship.angle - Math.PI / 2) * 0.5
+
+      // Apply thrust to velocity
+      ship.vx += thrustForceX
+      ship.vy += thrustForceY
+    } else {
+      // Stop thrust sound if not thrusting
+      stopSound("thrust")
+    }
+
+    // Apply brake
+    if (keysRef.current.ArrowDown) {
+      ship.vx *= 0.7 // Stronger braking (was 0.9)
+      ship.vy *= 0.7 // Stronger braking
+    }
+
+    // Calculate distance to planet
+    const dx = planet.x - ship.x
+    const dy = planet.y - ship.y
+    const distance = Math.sqrt(dx * dx + dy * dy)
+
+    // Reset gravity force
+    ship.gravityForce = { x: 0, y: 0 }
+
+    // Apply gravity (weaker with distance)
+    if (distance < planet.gravityFieldRadius) {
+      // Gravity gets stronger as you get closer to the planet
+      const gravityFactor =
+        planet.gravityStrength * (1 - (distance - planet.radius) / (planet.gravityFieldRadius - planet.radius))
+
+      // Calculate gravity force components
+      const gravityForceX = (dx / distance) * gravityFactor
+      const gravityForceY = (dy / distance) * gravityFactor
+
+      // Store gravity force for visualization
+      ship.gravityForce = { x: gravityForceX, y: gravityForceY }
+
+      // Apply gravity to velocity
+      ship.vx += gravityForceX
+      ship.vy += gravityForceY
+    }
+
+    // Calculate net force (sum of all forces)
+    // For educational purposes, we're simplifying by using the velocity change as the net force
+    ship.netForce = { x: ship.vx, y: ship.vy }
+
+    // Update position
+    ship.x += ship.vx
+    ship.y += ship.vy
+
+    // Check if ship is approaching the landing pad
+    const isOverBase = isPointOverBase(ship.x, ship.y)
+
+    // Update landing guidance
+    ship.isOverBase = isOverBase
+
+    if (distance < planet.radius * 1.5) {
+      const velocity = Math.sqrt(ship.vx * ship.vx + ship.vy * ship.vy)
+      const safeSpeed = LEVELS[currentLevel].safeSpeed
+
+      if (velocity < safeSpeed) {
+        setLandingGuidance("Good approach! You can land safely.")
+      } else {
+        setLandingGuidance(`Slow down more for landing. Safe speed: < ${safeSpeed.toFixed(1)}`)
+      }
+    } else {
+      setLandingGuidance("")
+    }
+
+    // Check for collision with planet
+    if (distance < planet.radius + ship.size) {
+      // Calculate velocity magnitude
+      const velocity = Math.sqrt(ship.vx * ship.vx + ship.vy * ship.vy)
+
+      // Calculate collision point
+      const collisionAngle = Math.atan2(dy, dx)
+      const collisionX = planet.x - Math.cos(collisionAngle) * planet.radius
+      const collisionY = planet.y - Math.sin(collisionAngle) * planet.radius
+
+      // Check if collision point is on the base
+      const landedOnBase = isPointOverBase(collisionX, collisionY)
+      ship.landedOnBase = landedOnBase
+
+      // Get safe speed from current level
+      const safeSpeed = LEVELS[currentLevel].safeSpeed
+
+      // Check landing conditions
+      if (landedOnBase) {
+        if (velocity < safeSpeed) {
+          // Successful landing on base
+          ship.landed = true
+
+          // Check if this was the last level
+          if (currentLevel === LEVELS.length - 1) {
+            setGameMessage("Congratulations! You've completed all levels!")
+            setGameCompleted(true)
+          } else {
+            setGameMessage("Congratulations, you safely landed at the base!")
+          }
+
+          setGameOver(true)
+        } else {
+          // Crashed due to speed
+          ship.crashed = true
+          setGameMessage(`Crashed! You were going too fast. Safe speed: < ${safeSpeed.toFixed(1)}`)
+          setGameOver(true)
+        }
+      } else {
+        // Landing elsewhere - also very forgiving
+        const generalSafeSpeed = 6.0
+
+        if (velocity < generalSafeSpeed) {
+          // Managed to land safely elsewhere
+          ship.landed = true
+          setGameMessage("Try to land on the green base at the bottom of the planet.")
+          setGameOver(true)
+        } else {
+          // Crashed on planet surface
+          ship.crashed = true
+          setGameMessage("Crashed! You were going too fast.")
+          setGameOver(true)
+        }
+      }
+
+      // Place ship on surface
+      ship.x = planet.x - Math.cos(collisionAngle) * (planet.radius + ship.size)
+      ship.y = planet.y - Math.sin(collisionAngle) * (planet.radius + ship.size)
+
+      // Stop movement
+      ship.vx = 0
+      ship.vy = 0
+    }
+
+    // Check if ship is out of bounds
+    if (ship.x < -50 || ship.x > canvas.width + 50 || ship.y < -50 || ship.y > canvas.height + 50) {
+      setGameMessage("You are lost in space! Try again.")
+      setGameOver(true)
+    }
+  }
+
+  // Draw game
+  const drawGame = () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const ctx = canvas.getContext("2d")
+    if (!ctx) return
+
+    const ship = shipRef.current
+    const planet = planetRef.current
+    const base = baseRef.current
+
+    // Clear canvas
+    ctx.fillStyle = "black"
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+    // Draw stars
+    starsRef.current.forEach((star) => {
+      ctx.beginPath()
+
+      // Calculate opacity for twinkling effect
+      const opacity = 0.5 + 0.5 * Math.sin(star.twinkle)
+
+      // Use a radial gradient for larger stars to create a glow effect
+      if (star.size > 1) {
+        const gradient = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, star.size * 2)
+        gradient.addColorStop(0, star.color)
+        gradient.addColorStop(1, `rgba(255, 255, 255, 0)`)
+        ctx.fillStyle = gradient
+        ctx.arc(star.x, star.y, star.size * 2, 0, Math.PI * 2)
+      } else {
+        ctx.fillStyle = `${star.color}${Math.floor(opacity * 255)
+          .toString(16)
+          .padStart(2, "0")}`
+        ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2)
+      }
+
+      ctx.fill()
+    })
+
+    // Draw distant nebula (decorative background element)
+    const nebulaGradient = ctx.createRadialGradient(
+      canvas.width * 0.8,
+      canvas.height * 0.2,
+      0,
+      canvas.width * 0.8,
+      canvas.height * 0.2,
+      canvas.width * 0.4,
+    )
+    nebulaGradient.addColorStop(0, "rgba(147, 51, 234, 0.1)")
+    nebulaGradient.addColorStop(0.5, "rgba(79, 70, 229, 0.05)")
+    nebulaGradient.addColorStop(1, "rgba(0, 0, 0, 0)")
+
+    ctx.beginPath()
+    ctx.fillStyle = nebulaGradient
+    ctx.arc(canvas.width * 0.8, canvas.height * 0.2, canvas.width * 0.4, 0, Math.PI * 2)
+    ctx.fill()
+
+    // Draw gravity field
+    const gradient = ctx.createRadialGradient(
+      planet.x,
+      planet.y,
+      planet.radius,
+      planet.x,
+      planet.y,
+      planet.gravityFieldRadius,
+    )
+    gradient.addColorStop(0, `${planet.color}33`) // Planet color with 20% opacity
+    gradient.addColorStop(1, "rgba(0, 0, 0, 0)") // Transparent
+
+    ctx.beginPath()
+    ctx.arc(planet.x, planet.y, planet.gravityFieldRadius, 0, Math.PI * 2)
+    ctx.fillStyle = gradient
+    ctx.fill()
+
+    // Draw planet atmosphere glow
+    const atmosphereGradient = ctx.createRadialGradient(
+      planet.x,
+      planet.y,
+      planet.radius * 0.9,
+      planet.x,
+      planet.y,
+      planet.radius * 1.1,
+    )
+
+    // Different atmosphere colors based on planet type
+    let atmosphereColor
+    switch (planet.type) {
+      case "earth":
+        atmosphereColor = "rgba(59, 130, 246, 0.5)" // Blue
+        break
+      case "rocky":
+        atmosphereColor = "rgba(156, 163, 175, 0.3)" // Gray
+        break
+      case "gas":
+        atmosphereColor = "rgba(192, 132, 252, 0.5)" // Purple
+        break
+      case "lava":
+        atmosphereColor = "rgba(249, 115, 22, 0.5)" // Orange
+        break
+      case "ice":
+        atmosphereColor = "rgba(186, 230, 253, 0.4)" // Light blue
+        break
+      default:
+        atmosphereColor = "rgba(255, 255, 255, 0.3)"
+    }
+
+    atmosphereGradient.addColorStop(0, atmosphereColor)
+    atmosphereGradient.addColorStop(1, "rgba(0, 0, 0, 0)")
+
+    ctx.beginPath()
+    ctx.arc(planet.x, planet.y, planet.radius * 1.1, 0, Math.PI * 2)
+    ctx.fillStyle = atmosphereGradient
+    ctx.fill()
+
+    // Draw planet base
+    ctx.beginPath()
+    ctx.arc(planet.x, planet.y, planet.radius, 0, Math.PI * 2)
+
+    // Create a gradient for the planet
+    const planetGradient = ctx.createRadialGradient(
+      planet.x - planet.radius * 0.3,
+      planet.y - planet.radius * 0.3,
+      0,
+      planet.x,
+      planet.y,
+      planet.radius,
+    )
+
+    // Adjust gradient colors based on planet type
+    switch (planet.type) {
+      case "earth":
+        planetGradient.addColorStop(0, "#60a5fa") // Lighter blue
+        planetGradient.addColorStop(0.7, "#2563eb") // Medium blue
+        planetGradient.addColorStop(1, "#1e40af") // Dark blue
+        break
+      case "rocky":
+        planetGradient.addColorStop(0, "#9ca3af") // Light gray
+        planetGradient.addColorStop(0.7, "#6b7280") // Medium gray
+        planetGradient.addColorStop(1, "#4b5563") // Dark gray
+        break
+      case "gas":
+        planetGradient.addColorStop(0, "#c084fc") // Light purple
+        planetGradient.addColorStop(0.7, "#a855f7") // Medium purple
+        planetGradient.addColorStop(1, "#7e22ce") // Dark purple
+        break
+      case "lava":
+        planetGradient.addColorStop(0, "#fdba74") // Light orange
+        planetGradient.addColorStop(0.5, "#f97316") // Medium orange
+        planetGradient.addColorStop(1, "#b91c1c") // Dark red
+        break
+      case "ice":
+        planetGradient.addColorStop(0, "#e0f2fe") // Very light blue
+        planetGradient.addColorStop(0.7, "#bae6fd") // Light blue
+        planetGradient.addColorStop(1, "#0ea5e9") // Medium blue
+        break
+      default:
+        planetGradient.addColorStop(0, "#9ca3af")
+        planetGradient.addColorStop(1, "#4b5563")
+    }
+
+    ctx.fillStyle = planetGradient
+    ctx.fill()
+
+    // Draw planet features
+    ctx.save()
+    ctx.translate(planet.x, planet.y)
+
+    planet.features.forEach((feature) => {
+      ctx.save()
+      ctx.rotate(feature.angle)
+
+      // Draw feature
+      ctx.beginPath()
+      ctx.arc(0, 0, planet.radius, -feature.width / 2, feature.width / 2)
+      ctx.lineTo((feature.width / 2) * planet.radius, -feature.height)
+      ctx.lineTo((-feature.width / 2) * planet.radius, -feature.height)
+      ctx.closePath()
+
+      ctx.fillStyle = feature.color
+      ctx.fill()
+
+      ctx.restore()
+    })
+
+    // Draw landing base
+    // Calculate base position
+    const baseStartAngle = base.angle - base.angleWidth / 2
+    const baseEndAngle = base.angle + base.angleWidth / 2
+
+    // Draw base platform with gradient
+    const baseGradient = ctx.createLinearGradient(0, 0, 0, base.height * 1.5)
+    baseGradient.addColorStop(0, "#10b981") // Green
+    baseGradient.addColorStop(1, "#047857") // Dark green
+
+    ctx.beginPath()
+    ctx.arc(0, 0, planet.radius, baseStartAngle, baseEndAngle)
+    ctx.arc(0, 0, planet.radius + base.height, baseEndAngle, baseStartAngle, true)
+    ctx.closePath()
+    ctx.fillStyle = baseGradient
+    ctx.fill()
+
+    // Add metallic edge to the landing pad
+    ctx.beginPath()
+    ctx.arc(0, 0, planet.radius, baseStartAngle, baseEndAngle)
+    ctx.lineWidth = 2
+    ctx.strokeStyle = "#d1d5db" // Light gray
+    ctx.stroke()
+
+    // Draw landing lights
+    const lightCount = 5
+    for (let i = 0; i < lightCount; i++) {
+      const lightAngle = baseStartAngle + (base.angleWidth * i) / (lightCount - 1)
+      const lightX = Math.cos(lightAngle) * (planet.radius + 5)
+      const lightY = Math.sin(lightAngle) * (planet.radius + 5)
+
+      // Draw light glow
+      const lightGradient = ctx.createRadialGradient(lightX, lightY, 0, lightX, lightY, 5)
+      lightGradient.addColorStop(0, "#fbbf24") // Yellow
+      lightGradient.addColorStop(1, "rgba(251, 191, 36, 0)")
+
+      ctx.beginPath()
+      ctx.arc(lightX, lightY, 5, 0, Math.PI * 2)
+      ctx.fillStyle = lightGradient
+      ctx.fill()
+
+      // Draw light center
+      ctx.beginPath()
+      ctx.arc(lightX, lightY, 2, 0, Math.PI * 2)
+      ctx.fillStyle = "#fbbf24" // Yellow
+      ctx.fill()
+    }
+
+    // Draw landing approach path if ship is over base
+    if (ship.isOverBase && !ship.landed && !ship.crashed) {
+      const dx = planet.x - ship.x
+      const dy = planet.y - ship.y
+      const angle = Math.atan2(dy, dx)
+
+      ctx.beginPath()
+      ctx.moveTo(0, 0)
+      ctx.lineTo(Math.cos(angle) * planet.radius * 1.5, Math.sin(angle) * planet.radius * 1.5)
+
+      // Create gradient for approach path
+      const approachGradient = ctx.createLinearGradient(
+        0,
+        0,
+        Math.cos(angle) * planet.radius * 1.5,
+        Math.sin(angle) * planet.radius * 1.5,
+      )
+      approachGradient.addColorStop(0, "rgba(16, 185, 129, 0.7)") // Green
+      approachGradient.addColorStop(1, "rgba(16, 185, 129, 0)")
+
+      ctx.strokeStyle = approachGradient
+      ctx.lineWidth = 10
+      ctx.stroke()
+    }
+
+    ctx.restore()
+
+    // Draw ship
+    ctx.save()
+    ctx.translate(ship.x, ship.y)
+    ctx.rotate(ship.angle)
+
+    // Ship body - now more like a starfighter
+    const shipWidth = ship.size * 1.5
+    const shipLength = ship.size * 2
+
+    // Draw ship body
+    ctx.beginPath()
+    ctx.moveTo(0, -shipLength) // Nose
+    ctx.lineTo(shipWidth / 2, -shipLength / 2) // Right front wing
+    ctx.lineTo(shipWidth, shipLength / 3) // Right wing tip
+    ctx.lineTo(shipWidth / 3, shipLength / 2) // Right back
+    ctx.lineTo(-shipWidth / 3, shipLength / 2) // Left back
+    ctx.lineTo(-shipWidth, shipLength / 3) // Left wing tip
+    ctx.lineTo(-shipWidth / 2, -shipLength / 2) // Left front wing
+    ctx.closePath()
+
+    // Change color based on ship state
+    let shipGradient
+    if (ship.crashed) {
+      shipGradient = ctx.createLinearGradient(0, -shipLength, 0, shipLength / 2)
+      shipGradient.addColorStop(0, "#7f1d1d") // Dark red
+      shipGradient.addColorStop(1, "#b91c1c") // Medium red
+    } else if (ship.landed && ship.landedOnBase) {
+      shipGradient = ctx.createLinearGradient(0, -shipLength, 0, shipLength / 2)
+      shipGradient.addColorStop(0, "#047857") // Dark green
+      shipGradient.addColorStop(1, "#10b981") // Medium green
+    } else if (ship.landed) {
+      shipGradient = ctx.createLinearGradient(0, -shipLength, 0, shipLength / 2)
+      shipGradient.addColorStop(0, "#6b7280") // Dark gray
+      shipGradient.addColorStop(1, "#9ca3af") // Medium gray
+    } else if (ship.isOverBase) {
+      shipGradient = ctx.createLinearGradient(0, -shipLength, 0, shipLength / 2)
+      shipGradient.addColorStop(0, "#10b981") // Green
+      shipGradient.addColorStop(1, "#34d399") // Light green
+    } else {
+      shipGradient = ctx.createLinearGradient(0, -shipLength, 0, shipLength / 2)
+      shipGradient.addColorStop(0, "#dc2626") // Red
+      shipGradient.addColorStop(1, "#ef4444") // Light red
+    }
+
+    ctx.fillStyle = shipGradient
+    ctx.fill()
+
+    // Add cockpit
+    ctx.beginPath()
+    ctx.ellipse(0, -shipLength / 3, shipWidth / 4, shipLength / 4, 0, 0, Math.PI * 2)
+    ctx.fillStyle = "#60a5fa" // Blue
+    ctx.fill()
+    ctx.strokeStyle = "#d1d5db" // Light gray
+    ctx.lineWidth = 1
+    ctx.stroke()
+
+    // Add engine details
+    ctx.beginPath()
+    ctx.rect(-shipWidth / 4, shipLength / 4, shipWidth / 2, shipLength / 4)
+    ctx.fillStyle = "#4b5563" // Dark gray
+    ctx.fill()
+
+    // Draw flames if crashed
+    if (ship.crashed) {
+      for (let i = 0; i < 8; i++) {
+        const flameX = Math.random() * shipWidth * 1.5 - shipWidth * 0.75
+        const flameY = Math.random() * shipLength - shipLength / 3
+        const flameSize = Math.random() * 5 + 3
+
+        // Create flame gradient
+        const flameGradient = ctx.createRadialGradient(flameX, flameY, 0, flameX, flameY, flameSize * 2)
+        flameGradient.addColorStop(0, "rgba(255, 255, 0, 0.8)")
+        flameGradient.addColorStop(0.5, "rgba(255, 165, 0, 0.6)")
+        flameGradient.addColorStop(1, "rgba(255, 0, 0, 0)")
+
+        ctx.beginPath()
+        ctx.arc(flameX, flameY, flameSize * 2, 0, Math.PI * 2)
+        ctx.fillStyle = flameGradient
+        ctx.fill()
+      }
+    }
+
+    // Thrust flame
+    if (ship.thrusting && !ship.crashed && !ship.landed) {
+      // Create flame gradient
+      const flameGradient = ctx.createLinearGradient(0, shipLength / 2, 0, shipLength * 1.5)
+      flameGradient.addColorStop(0, "#f59e0b") // Amber
+      flameGradient.addColorStop(0.6, "#ef4444") // Red
+      flameGradient.addColorStop(1, "rgba(239, 68, 68, 0)") // Transparent red
+
+      // Main flame
+      ctx.beginPath()
+      ctx.moveTo(-shipWidth / 4, shipLength / 2)
+      ctx.lineTo(0, shipLength * 1.5)
+      ctx.lineTo(shipWidth / 4, shipLength / 2)
+      ctx.closePath()
+      ctx.fillStyle = flameGradient
+      ctx.fill()
+
+      // Add some randomness to the flame
+      for (let i = 0; i < 3; i++) {
+        const flameWidth = Math.random() * (shipWidth / 4) + shipWidth / 8
+        const flameLength = Math.random() * shipLength + shipLength / 2
+
+        ctx.beginPath()
+        ctx.moveTo(-flameWidth, shipLength / 2)
+        ctx.lineTo(0, flameLength)
+        ctx.lineTo(flameWidth, shipLength / 2)
+        ctx.closePath()
+        ctx.fillStyle = "rgba(255, 165, 0, 0.5)"
+        ctx.fill()
+      }
+    }
+
+    ctx.restore()
+
+    // Draw force vectors if ship is not landed or crashed
+    if (!ship.landed && !ship.crashed) {
+      // Draw gravity force vector (green)
+      if (ship.gravityForce.x !== 0 || ship.gravityForce.y !== 0) {
+        const gravityScale = 50 // Scale factor to make vector visible
+
+        ctx.beginPath()
+        ctx.moveTo(ship.x, ship.y)
+        ctx.lineTo(ship.x + ship.gravityForce.x * gravityScale, ship.y + ship.gravityForce.y * gravityScale)
+
+        // Create gradient for gravity vector
+        const gravityGradient = ctx.createLinearGradient(
+          ship.x,
+          ship.y,
+          ship.x + ship.gravityForce.x * gravityScale,
+          ship.y + ship.gravityForce.y * gravityScale,
+        )
+        gravityGradient.addColorStop(0, "rgba(16, 185, 129, 1)") // Green
+        gravityGradient.addColorStop(1, "rgba(16, 185, 129, 0.2)")
+
+        ctx.strokeStyle = gravityGradient
+        ctx.lineWidth = 3
+        ctx.stroke()
+
+        // Draw arrowhead
+        const angle = Math.atan2(ship.gravityForce.y, ship.gravityForce.x)
+        const arrowSize = 8
+
+        ctx.beginPath()
+        ctx.moveTo(ship.x + ship.gravityForce.x * gravityScale, ship.y + ship.gravityForce.y * gravityScale)
+        ctx.lineTo(
+          ship.x + ship.gravityForce.x * gravityScale - arrowSize * Math.cos(angle - Math.PI / 6),
+          ship.y + ship.gravityForce.y * gravityScale - arrowSize * Math.sin(angle - Math.PI / 6),
+        )
+        ctx.lineTo(
+          ship.x + ship.gravityForce.x * gravityScale - arrowSize * Math.cos(angle + Math.PI / 6),
+          ship.y + ship.gravityForce.y * gravityScale - arrowSize * Math.sin(angle + Math.PI / 6),
+        )
+        ctx.closePath()
+        ctx.fillStyle = "#10b981" // Green
+        ctx.fill()
+      }
+
+      // Draw net force vector (yellow)
+      if (ship.netForce.x !== 0 || ship.netForce.y !== 0) {
+        const netForceScale = 10 // Scale factor to make vector visible
+
+        ctx.beginPath()
+        ctx.moveTo(ship.x, ship.y)
+        ctx.lineTo(ship.x + ship.netForce.x * netForceScale, ship.y + ship.netForce.y * netForceScale)
+
+        // Create gradient for net force vector
+        const netForceGradient = ctx.createLinearGradient(
+          ship.x,
+          ship.y,
+          ship.x + ship.netForce.x * netForceScale,
+          ship.y + ship.netForce.y * netForceScale,
+        )
+        netForceGradient.addColorStop(0, "rgba(250, 204, 21, 1)") // Yellow
+        netForceGradient.addColorStop(1, "rgba(250, 204, 21, 0.2)")
+
+        ctx.strokeStyle = netForceGradient
+        ctx.lineWidth = 3
+        ctx.stroke()
+
+        // Draw arrowhead
+        const angle = Math.atan2(ship.netForce.y, ship.netForce.x)
+        const arrowSize = 8
+
+        ctx.beginPath()
+        ctx.moveTo(ship.x + ship.netForce.x * netForceScale, ship.y + ship.netForce.y * netForceScale)
+        ctx.lineTo(
+          ship.x + ship.netForce.x * netForceScale - arrowSize * Math.cos(angle - Math.PI / 6),
+          ship.y + ship.netForce.y * netForceScale - arrowSize * Math.sin(angle - Math.PI / 6),
+        )
+        ctx.lineTo(
+          ship.x + ship.netForce.x * netForceScale - arrowSize * Math.cos(angle + Math.PI / 6),
+          ship.y + ship.netForce.y * netForceScale - arrowSize * Math.sin(angle + Math.PI / 6),
+        )
+        ctx.closePath()
+        ctx.fillStyle = "#facc15" // Yellow
+        ctx.fill()
+      }
+    }
+
+    // Draw velocity
+    ctx.fillStyle = "white"
+    ctx.font = "14px monospace"
+    ctx.fillText(`Velocity: ${Math.sqrt(ship.vx * ship.vx + ship.vy * ship.vy).toFixed(2)}`, 10, 20)
+
+    // Draw level info
+    ctx.fillStyle = "white"
+    ctx.font = "16px sans-serif"
+    ctx.textAlign = "right"
+    ctx.fillText(`${LEVELS[currentLevel].name}`, canvas.width - 10, 20)
+    ctx.font = "14px sans-serif"
+    ctx.fillText(`Safe landing speed: < ${LEVELS[currentLevel].safeSpeed.toFixed(1)}`, canvas.width - 10, 40)
+    ctx.textAlign = "left"
+
+    // Draw force legend
+    ctx.fillStyle = "white"
+    ctx.font = "14px sans-serif"
+    ctx.fillText("Forces:", 10, canvas.height - 60)
+
+    // Yellow line for net force
+    ctx.beginPath()
+    ctx.moveTo(10, canvas.height - 45)
+    ctx.lineTo(30, canvas.height - 45)
+    ctx.strokeStyle = "#facc15" // Yellow
+    ctx.lineWidth = 3
+    ctx.stroke()
+    ctx.fillText("Net Force (Yellow)", 35, canvas.height - 40)
+
+    // Green line for gravity
+    ctx.beginPath()
+    ctx.moveTo(10, canvas.height - 25)
+    ctx.lineTo(30, canvas.height - 25)
+    ctx.strokeStyle = "#10b981" // Green
+    ctx.lineWidth = 3
+    ctx.stroke()
+    ctx.fillText("Gravity Force (Green)", 35, canvas.height - 20)
+
+    // Draw landing guidance
+    if (landingGuidance) {
+      ctx.fillStyle = ship.isOverBase ? "#10b981" : "white"
+      ctx.font = "16px sans-serif"
+      ctx.textAlign = "center"
+      ctx.fillText(landingGuidance, canvas.width / 2, canvas.height - 80)
+      ctx.textAlign = "left"
+    }
+  }
+
+  // Button handlers
+  const handleButtonDown = (key: keyof typeof keysRef.current) => {
+    if (gameOver) return
+
+    if (showLevelIntro) {
+      setShowLevelIntro(false)
+      playSound("button")
+      return
+    }
+
+    // Play button sound only on initial press
+    playSound("button")
+
+    keysRef.current[key] = true
+
+    // If ship is landed and a button is pressed, take off
+    if (shipRef.current.landed) {
+      shipRef.current.landed = false
+      shipRef.current.landedOnBase = false
+      // Add a small initial velocity away from planet
+      shipRef.current.vx = Math.cos(shipRef.current.angle - Math.PI / 2) * 0.5
+      shipRef.current.vy = Math.sin(shipRef.current.angle - Math.PI / 2) * 0.5
+    }
+
+    // Start thrust sound if thrusting
+    if (key === "ArrowUp" && soundEnabled) {
+      playSound("thrust")
+    }
+  }
+
+  const handleButtonUp = (key: keyof typeof keysRef.current) => {
+    keysRef.current[key] = false
+
+    // Stop thrust sound if releasing thrust button
+    if (key === "ArrowUp") {
+      stopSound("thrust")
+    }
+  }
+
+  const resetGame = () => {
+    playSound("button")
+    setGameOver(false)
+    setGameMessage("")
+    setLandingGuidance("")
+    initializeLevel(currentLevel)
+  }
+
+  const nextLevel = () => {
+    playSound("button")
+    if (currentLevel < LEVELS.length - 1) {
+      setCurrentLevel(currentLevel + 1)
+      setGameOver(false)
+      setGameMessage("")
+      setLandingGuidance("")
+      setShowLevelIntro(true)
+    }
+  }
+
+  const restartGame = () => {
+    playSound("button")
+    setCurrentLevel(0)
+    setGameOver(false)
+    setGameMessage("")
+    setLandingGuidance("")
+    setShowLevelIntro(true)
+    setGameCompleted(false)
+  }
+
+  const toggleHelp = () => {
+    playSound("button")
+    setShowHelp(!showHelp)
+  }
+
+  const toggleSound = () => {
+    setSoundEnabled(!soundEnabled)
+
+    // Stop thrust sound if sound is disabled
+    if (soundEnabled && thrustSoundRef.current) {
+      stopSound("thrust")
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 p-4">
+      <div className="relative">
+        <canvas ref={canvasRef} width={800} height={600} className="border border-gray-700 bg-black rounded-lg" />
+
+        {/* Audio elements */}
+        <audio ref={thrustSoundRef} src="/thrust.mp3" preload="auto" loop />
+        <audio ref={crashSoundRef} src="/crash.mp3" preload="auto" />
+        <audio ref={landingSoundRef} src="/landing.mp3" preload="auto" />
+        <audio ref={buttonSoundRef} src="/button.mp3" preload="auto" />
+        <audio ref={completeSoundRef} src="/complete.mp3" preload="auto" />
+
+        {showLevelIntro && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black bg-opacity-80 rounded-lg">
+            <h2 className="text-white text-3xl mb-2">{LEVELS[currentLevel].name}</h2>
+            <p className="text-white text-xl mb-6">{LEVELS[currentLevel].description}</p>
+            <p className="text-white mb-8">Safe landing speed: &lt; {LEVELS[currentLevel].safeSpeed.toFixed(1)}</p>
+            <Button onClick={() => setShowLevelIntro(false)} className="bg-green-600 hover:bg-green-700">
+              Start Level
+            </Button>
+          </div>
+        )}
+
+        {showHelp && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black bg-opacity-90 rounded-lg p-8 overflow-auto">
+            <h2 className="text-white text-3xl mb-4">Gravity Lander: How to Play</h2>
+
+            <div className="text-white text-left max-w-2xl">
+              <h3 className="text-xl font-bold mb-2">Controls:</h3>
+              <ul className="list-disc pl-6 mb-4">
+                <li>Up Arrow: Apply thrust to move the ship</li>
+                <li>Left/Right Arrows: Rotate the ship</li>
+                <li>Down Arrow: Apply brakes to slow down</li>
+              </ul>
+
+              <h3 className="text-xl font-bold mb-2">Physics Concepts:</h3>
+              <ul className="list-disc pl-6 mb-4">
+                <li>
+                  <span className="text-green-400">Green Arrow:</span> Shows the gravitational force pulling your ship
+                  toward the planet
+                </li>
+                <li>
+                  <span className="text-yellow-400">Yellow Arrow:</span> Shows the net force (resultant force) acting on
+                  your ship
+                </li>
+                <li>The strength of gravity decreases as you move away from the planet</li>
+                <li>You must balance thrust against gravity to land safely</li>
+              </ul>
+
+              <h3 className="text-xl font-bold mb-2">Objective:</h3>
+              <p className="mb-4">
+                Land your spaceship on the green landing pad at a safe speed. If you land too fast, your ship will
+                crash!
+              </p>
+
+              <h3 className="text-xl font-bold mb-2">Tips for Teachers:</h3>
+              <ul className="list-disc pl-6 mb-4">
+                <li>Use this game to demonstrate how gravitational force changes with distance</li>
+                <li>Discuss how thrust and gravity create a resultant force that determines the ship's path</li>
+                <li>Challenge students to explain why the ship accelerates faster as it gets closer to the planet</li>
+              </ul>
+            </div>
+
+            <Button onClick={toggleHelp} className="mt-4 bg-blue-600 hover:bg-blue-700">
+              Close Help
+            </Button>
+          </div>
+        )}
+
+        {gameOver && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black bg-opacity-70 rounded-lg">
+            <p className="text-white text-2xl mb-4">{gameMessage}</p>
+            <div className="flex gap-4">
+              {shipRef.current.landedOnBase && !gameCompleted && (
+                <Button onClick={nextLevel} className="flex items-center gap-2 bg-green-600 hover:bg-green-700">
+                  Next Level
+                </Button>
+              )}
+
+              {gameCompleted ? (
+                <Button onClick={restartGame} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700">
+                  Play Again
+                </Button>
+              ) : (
+                <Button
+                  id="reset-button"
+                  onClick={resetGame}
+                  className="flex items-center gap-2 bg-red-600 hover:bg-red-700"
+                >
+                  <RotateCcw size={16} />
+                  Retry Level
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-4 flex justify-center gap-2 items-center">
+          <div className="grid grid-cols-3 gap-2">
+            <div></div>
+            <Button
+              variant="outline"
+              size="icon"
+              onMouseDown={() => handleButtonDown("ArrowUp")}
+              onMouseUp={() => handleButtonUp("ArrowUp")}
+              onMouseLeave={() => handleButtonUp("ArrowUp")}
+              onTouchStart={() => handleButtonDown("ArrowUp")}
+              onTouchEnd={() => handleButtonUp("ArrowUp")}
+              className="bg-red-600 hover:bg-red-700 text-white"
+              disabled={gameOver}
+            >
+              <ArrowUp />
+            </Button>
+            <div></div>
+            <Button
+              variant="outline"
+              size="icon"
+              onMouseDown={() => handleButtonDown("ArrowLeft")}
+              onMouseUp={() => handleButtonUp("ArrowLeft")}
+              onMouseLeave={() => handleButtonUp("ArrowLeft")}
+              onTouchStart={() => handleButtonDown("ArrowLeft")}
+              onTouchEnd={() => handleButtonUp("ArrowLeft")}
+              className="bg-gray-800 hover:bg-gray-700 text-white"
+              disabled={gameOver}
+            >
+              <ArrowLeft />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              onMouseDown={() => handleButtonDown("ArrowDown")}
+              onMouseUp={() => handleButtonUp("ArrowDown")}
+              onMouseLeave={() => handleButtonUp("ArrowDown")}
+              onTouchStart={() => handleButtonDown("ArrowDown")}
+              onTouchEnd={() => handleButtonUp("ArrowDown")}
+              className="bg-gray-800 hover:bg-gray-700 text-white"
+              disabled={gameOver}
+            >
+              <ArrowDown />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              onMouseDown={() => handleButtonDown("ArrowRight")}
+              onMouseUp={() => handleButtonUp("ArrowRight")}
+              onMouseLeave={() => handleButtonUp("ArrowRight")}
+              onTouchStart={() => handleButtonDown("ArrowRight")}
+              onTouchEnd={() => handleButtonUp("ArrowRight")}
+              className="bg-gray-800 hover:bg-gray-700 text-white"
+              disabled={gameOver}
+            >
+              <ArrowRight />
+            </Button>
+          </div>
+
+          <div className="ml-4 flex gap-2">
+            <Button variant="outline" onClick={resetGame} className="bg-gray-700 hover:bg-gray-600 text-white">
+              <RotateCcw size={16} className="mr-2" />
+              Reset
+            </Button>
+
+            <Button variant="outline" onClick={toggleHelp} className="bg-blue-700 hover:bg-blue-600 text-white">
+              <HelpCircle size={16} className="mr-2" />
+              Help
+            </Button>
+
+            <Button variant="outline" onClick={toggleSound} className="bg-gray-700 hover:bg-gray-600 text-white">
+              {soundEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-4 text-center text-gray-300 text-sm">
+          <p>Press any key or button to take off. Land on the green base at the bottom of the planet.</p>
+          <p>Up: Thrust | Left/Right: Rotate | Down: Brake | H: Help</p>
+        </div>
+      </div>
+    </div>
+  )
+}
